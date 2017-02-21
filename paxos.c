@@ -14,11 +14,6 @@
 
 #include "proto.h"
 
-/* ---------------------------------
- *
- * ---------------------------------
- */
-
 #define BUFSIZE 8192
 #define InvalidSocket -1
 #define InvalidBallot -1
