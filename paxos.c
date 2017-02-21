@@ -97,9 +97,6 @@ static void paxosPrepare(int i_id, int ballot);
 static void paxosPropose(int i_id, int ballot, int value);
 static void paxosLearn(int i_id, int ballot, int value);
 
-/* For debugging */
-static void dump_paxos_nodes(void);
-
 int
 main(int argc, char **argv)
 {
@@ -674,8 +671,20 @@ processMessage(char *msg, PaxosNode *node)
 				switch(mreq->type)
 				{
 					case 'd': /* Dump */
-						dump_paxos_nodes();
-						break;
+						{
+							int i;
+
+							fprintf(stderr, "------- DUMP --------\n");
+
+							for (i = 0; i < n_nodes; i++)
+							{
+								PaxosNode *n = &(PaxosNodes[i]);
+
+								fprintf(stderr, "[%d] id = %d, port = %d\n",
+										i, n->id, n->port);
+							}
+							break;
+						}
 					case 'i': /* Ping */
 						{
 							MsgHeader ping;
@@ -722,6 +731,10 @@ processMessage(char *msg, PaxosNode *node)
 						{
 							int i;
 
+							/* If there is nothing result */
+							if (CurrentInstId == -1)
+								printf("nothing to show\n");
+
 							for (i = 0; i <= CurrentInstId; i++)
 							{
 								Instance *inst = getInstance(i);
@@ -765,22 +778,6 @@ getPaxosNodesById(int id)
 	}
 
 	return NULL;
-}
-
-static void
-dump_paxos_nodes(void)
-{
-	int i;
-
-	fprintf(stderr, "------- DUMP --------\n");
-
-	for (i = 0; i < n_nodes; i++)
-	{
-		PaxosNode *n = &(PaxosNodes[i]);
-
-		fprintf(stderr, "[%d] id = %d, port = %d\n",
-				i, n->id, n->port);
-	}
 }
 
 static void usage(void)
