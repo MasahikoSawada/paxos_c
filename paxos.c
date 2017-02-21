@@ -18,14 +18,21 @@
 #define InvalidSocket -1
 #define InvalidBallot -1
 
+#define getInstance(i_id) &(PaxosInst[(i_id)])
+#define getBallotNumber(prev_b) ((prev_b) + 100 + ServId)
+
 #define init_message(header, mtype, dist) \
 do { \
 	((MsgHeader) (header)).type = (mtype); \
 	((MsgHeader) (header)).from = ServId; \
 	((MsgHeader) (header)).to = (dist); \
 } while(0)
-#define getInstance(i_id) &(PaxosInst[(i_id)])
-#define getBallotNumber(prev_b) ((prev_b) + 100 + ServId)
+
+#define DEBUG(fmt, ...) \
+do { \
+	if (Verbose) \
+		printf("<%d>: "fmt, ServId, __VA_ARGS__);\
+} while(0)
 
 typedef struct PaxosNode
 {
@@ -45,6 +52,8 @@ typedef struct Instance
 	/* Stats */
 	int n_votes;
 	int n_sents;
+	int max_b;	/* max ballot number already accepted */
+	int max_b_value; /* max value corresponding max_b */
 } Instance;
 
 /* Server global variables */
@@ -55,6 +64,7 @@ struct sockaddr_in servAddr;
 fd_set ReadFds;
 char *ConfigFile = "cluster.conf";
 int ProposeValue;
+int Verbose = 1;
 
 /*
  * Paxos nodes definitions.
@@ -65,8 +75,8 @@ int ProposeValue;
  * xxx : need to support flexible length array.
  */
 int n_nodes = 0;
-PaxosNode PaxosNodes[128];
-Instance PaxosInst[8192];
+PaxosNode PaxosNodes[128] = {};
+Instance PaxosInst[8192] = {};
 int CurrentInstId = -1;
 
 static void sigint_handler(int signal);
@@ -81,6 +91,7 @@ static char *getMessageFromSocket(int socket);
 static void processMessage(char *msg, PaxosNode *node);
 static void MainLoop(void);
 static PaxosNode *getPaxosNodesById(int id);
+static void usage(void);
 
 static void paxosPrepare(int i_id, int ballot);
 static void paxosPropose(int i_id, int ballot, int value);
@@ -97,7 +108,7 @@ main(int argc, char **argv)
 	char buf[BUFSIZE];
 	int num = 0;
 
-	while((opt = getopt(argc, argv, "p:i:f:")) != -1)
+	while((opt = getopt(argc, argv, "p:i:f:vh")) != -1)
 	{
 		switch(opt)
 		{
@@ -110,6 +121,12 @@ main(int argc, char **argv)
 			case 'f':
 				ConfigFile = strdup(optarg);
 				break;
+			case 'v':
+				Verbose = 0;
+				break;
+			case 'h':
+				usage();
+				exit(0);
 			default:
 				fprintf(stderr, "invalid option :%c\n", opt);
 		}
@@ -436,8 +453,8 @@ processMessage(char *msg, PaxosNode *node)
 			{
 				MsgJoin *mjoin = (MsgJoin *) msg;
 
-				fprintf(stdout, "recv \"%c\" (from id:port = %d:%d): port is \"%d\"\n",
-						msgtype, node->id, mjoin->port, mjoin->port);
+				DEBUG("recv \"%c\" (from id:port = %d:%d): port is \"%d\"\n",
+					  msgtype, node->id, mjoin->port, mjoin->port);
 
 				/*
 				 * Register Paxos node. Since socket is already saved
@@ -452,8 +469,8 @@ processMessage(char *msg, PaxosNode *node)
 				MsgHeader *ping = (MsgHeader *) msg;
 				MsgHeader pong;
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Ping FROM \"%d\" to \"%d\"\n",
-						msgtype, ping->from, ping->from, ping->to);
+				DEBUG("recv \"%c\" (from id = %d): Ping FROM \"%d\" to \"%d\"\n",
+					  msgtype, ping->from, ping->from, ping->to);
 
 				init_message(pong, 'i', ping->from);
 				sendMessage(node, (char *)&pong, sizeof(MsgHeader));
@@ -465,13 +482,13 @@ processMessage(char *msg, PaxosNode *node)
 				Instance *inst = getInstance(prepare->i_id);
 				MsgPromised promised;
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Prepare i_id = %d, ballot = %d\n",
-						msgtype, prepare->header.from, prepare->i_id, prepare->ballot);
+				DEBUG("recv \"%c\" (from id = %d): Prepare i_id = %d, ballot = %d\n",
+					  msgtype, prepare->header.from, prepare->i_id, prepare->ballot);
 
 				if (inst->ballot < prepare->ballot)
 				{
-					fprintf(stdout, "    -> prepared (inst:%d,prepare:%d)\n",
-							inst->ballot, prepare->ballot);
+					DEBUG("    -> prepared (inst:%d,prepare:%d)\n",
+						  inst->ballot, prepare->ballot);
 					/* Prepared if prepare ballot is higher than itself */
 					init_message(promised.header, 'P', prepare->header.from);
 					promised.i_id = prepare->i_id;
@@ -488,8 +505,8 @@ processMessage(char *msg, PaxosNode *node)
 				}
 				else
 				{
-					fprintf(stdout, "    -> rejected (inst:%d,prepare:%d)\n",
-							inst->ballot, prepare->ballot);
+					DEBUG("    -> reject (inst:%d,prepare:%d)\n",
+						  inst->ballot, prepare->ballot);
 					/* Reject, return ballot number */
 					init_message(promised.header, 'P', prepare->header.from);
 					promised.i_id = prepare->i_id;
@@ -505,9 +522,9 @@ processMessage(char *msg, PaxosNode *node)
 				MsgPromised *mpro = (MsgPromised *) msg;
 				Instance *inst = getInstance(mpro->i_id);
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Promised i_id = %d, ballot = %d, reject = %d\n",
-						msgtype, mpro->header.from,
-						mpro->i_id, mpro->ballot, mpro->reject);
+				DEBUG("recv \"%c\" (from id = %d): Promised i_id = %d, ballot = %d, reject = %d\n",
+					  msgtype, mpro->header.from,
+					  mpro->i_id, mpro->ballot, mpro->reject);
 
 				/* Prepare has been promised */
 				if (mpro->reject == 0)
@@ -521,13 +538,25 @@ processMessage(char *msg, PaxosNode *node)
 					if (inst->status != PAXOS_STATUS_PROMISED)
 					{
 						(inst->n_votes)++; /* increment vote */
-						fprintf(stdout, "    -> accepted, votes:%d, sents:%d\n",
-							inst->n_votes, inst->n_sents);
+						DEBUG("    -> accepted, votes:%d, sents:%d\n",
+							  inst->n_votes, inst->n_sents);
 
+						/*
+						 * Remember the max ballot and correponding value if this instance
+						 * has been already accepted. These max_b and max_b_value are used
+						 * when proposing later.
+						 */
+						if (mpro->v_ballot != InvalidBallot &&
+							inst->max_b < mpro->ballot)
+						{
+							inst->max_b = mpro->v_ballot;
+							inst->max_b_value = mpro->v_value;
+						}
+
+						/* Propose if we got promised from the majority */
 						if (inst->n_votes > (inst->n_sents / 2))
 						{
 							/*
-							 * Continue to process if got from majority.
 							 * xxx : need to support time out.
 							 * xxx : need to support to select highest ballot from all replies.
 							 */
@@ -538,17 +567,17 @@ processMessage(char *msg, PaxosNode *node)
 								/* this instance is not accepted yet, can propose own value */
 								paxosPropose(mpro->i_id, mpro->ballot, ProposeValue);
 							else
-								/* Already accepted, propose with given value and ballot */
-								paxosPropose(mpro->i_id, mpro->v_ballot, mpro->v_value);
+								/* Already accepted, propose with highest ballot and value */
+								paxosPropose(mpro->i_id, inst->max_b, inst->max_b_value);
 						}
 					}
 					else
 						/* Already propose this instance, ignore it */
-						fprintf(stdout, "        -> already promised ignore it\n");
+						DEBUG("        -> already promised ignore it, status %d\n", inst->status);
 				}
 				else
 				{
-					fprintf(stdout, "    -> rejected, again based on %d\n",
+					DEBUG("    -> rejected, again based on %d\n",
 							mpro->ballot);
 					/* prepare has been rejected, retry prepare again */
 					paxosPrepare(mpro->i_id, getBallotNumber(mpro->ballot));
@@ -561,10 +590,10 @@ processMessage(char *msg, PaxosNode *node)
 				MsgAccepted macep;
 				Instance *inst = getInstance(mprop->i_id);
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Propose i_id = %d, ballot = %d, value = %d\n",
-						msgtype, mprop->header.from,
-						mprop->i_id, mprop->ballot,
-						mprop->value);
+				DEBUG("recv \"%c\" (from id = %d): Propose i_id = %d, ballot = %d, value = %d\n",
+					  msgtype, mprop->header.from,
+					  mprop->i_id, mprop->ballot,
+					  mprop->value);
 
 				init_message(macep.header, 'a', mprop->header.from);
 
@@ -598,16 +627,16 @@ processMessage(char *msg, PaxosNode *node)
 				MsgAccepted *macep = (MsgAccepted *) msg;
 				Instance *inst = getInstance(macep->i_id);
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Accepted i_id = %d, ballot = %d, value = %d\n",
-						msgtype, macep->header.from,
-						macep->i_id, macep->ballot,
-						macep->value);
+				DEBUG("recv \"%c\" (from id = %d): Accepted i_id = %d, ballot = %d, value = %d\n",
+					  msgtype, macep->header.from,
+					  macep->i_id, macep->ballot,
+					  macep->value);
 
 				if (inst->status != PAXOS_STATUS_ACCEPTED)
 				{
 					(inst->n_votes)++;
-					fprintf(stdout, "    -> accepted votes:%d, sents:%d\n",
-							inst->n_votes, inst->n_sents);
+					DEBUG("    -> accepted votes:%d, sents:%d\n",
+						  inst->n_votes, inst->n_sents);
 
 					if (inst->n_votes > (inst->n_sents / 2))
 					{
@@ -628,10 +657,10 @@ processMessage(char *msg, PaxosNode *node)
 				MsgLearn *mlearn = (MsgLearn *) msg;
 				Instance *inst = getInstance(mlearn->i_id);
 
-				fprintf(stdout, "recv \"%c\" (from id = %d): Learn i_id = %d, ballot = %d, value = %d\n",
-						msgtype, mlearn->header.from,
-						mlearn->i_id, mlearn->ballot,
-						mlearn->value);
+				DEBUG("recv \"%c\" (from id = %d): Learn i_id = %d, ballot = %d, value = %d\n",
+					  msgtype, mlearn->header.from,
+					  mlearn->i_id, mlearn->ballot,
+					  mlearn->value);
 				inst->status = PAXOS_STATUS_ACCEPTED;
 				inst->ballot = mlearn->ballot;
 				inst->value = mlearn->value;
@@ -658,13 +687,13 @@ processMessage(char *msg, PaxosNode *node)
 
 							/* make ping message */
 							init_message(ping, 'i', mreq->to);
-							fprintf(stderr, "send ping to id = %d --> ", mreq->to);
+							DEBUG("send ping to id = %d --> ", mreq->to);
 
 							sendMessage(n, (char *)&ping, sizeof(MsgHeader));
 
 							/* get Pong message */
 							pong = (MsgHeader *) getMessage(n);
-							fprintf(stderr, "get pong\n");
+							DEBUG("get pong, from %d\n", pong->from);
 							break;
 						}
 					case 's': /* start paxos instance */
@@ -677,7 +706,7 @@ processMessage(char *msg, PaxosNode *node)
 							/* Check if given instance is already accepted */
 							if (inst->status == PAXOS_STATUS_PROMISED)
 							{
-								fprintf(stderr, "instance %d is already accepted\n", inst->i_id);
+								DEBUG("instance %d is already accepted\n", inst->i_id);
 								break;
 							}
 
@@ -697,8 +726,8 @@ processMessage(char *msg, PaxosNode *node)
 							{
 								Instance *inst = getInstance(i);
 
-								fprintf(stdout, "[%d] status = %d, ballot = %d, value = %d\n",
-										i, inst->status, inst->ballot, inst->value);
+								printf("[%d] status = %d, ballot = %d, value = %d\n",
+									   i, inst->status, inst->ballot, inst->value);
 							}
 						}
 				}
@@ -754,6 +783,15 @@ dump_paxos_nodes(void)
 	}
 }
 
+static void usage(void)
+{
+	printf("Usage:\n");
+	printf(" paxos [OPTION]\n");
+	printf("\nOptions:\n");
+	printf("  -i ID      Paxos ID\n");
+	printf("  -p PORT    Listen port\n");
+}
+
 static void
 paxosPrepare(int i_id, int ballot)
 {
@@ -761,7 +799,7 @@ paxosPrepare(int i_id, int ballot)
 	Instance *inst = getInstance(i_id);
 	int i;
 
-	fprintf(stdout, "        -> Do Prepare\n");
+	DEBUG("        -> Do Prepare with %d\n", ballot);
 
 	inst->n_votes = 1; /* vote by myself */
 	inst->n_sents = 1; /* initialize */
@@ -791,7 +829,7 @@ paxosPropose(int i_id, int ballot, int value)
 	Instance *inst = getInstance(i_id);
 	int i;
 
-	fprintf(stdout, "        -> Do Propose\n");
+	DEBUG("        -> Do Propose with %d\n", ballot);
 
 	inst->n_votes = 1; /* vote by myself */
 	inst->n_sents = 1; /* initialize */
